@@ -1,49 +1,63 @@
 #!/bin/bash
 
-# Set the process ID and cgroup name
-PID=<your_process_id>
-CGROUP_NAME=<your_cgroup_name>
+# Define the network interface to monitor
+NETWORK_INTERFACE="p2p1"
 
-# Set the network interface to monitor
-NETWORK_INTERFACE=eth0
+# Define the list of process names to monitor
+PROCESS_NAMES=("dcache" "css")
 
-# Set the class ID to use for the cgroup
-CLASS_ID=1:10
+# Loop through each process name and set up tc and net_cls rules
+for process_name in "${PROCESS_NAMES[@]}"
+do
+  # Get the PID of the process
+  pid=$(pgrep $process_name)
 
-# Create the cgroup and assign the process to it
-sudo cgcreate -g net_cls:$CLASS_ID
-sudo cgclassify -g net_cls:$CLASS_ID $PID
+  if [ -n "$pid" ]; then
+    # Generate a unique CLASS_ID for the process
+    CLASS_ID="$(uuidgen)"
 
-# Set up the qdisc and class for the cgroup
-sudo tc qdisc add dev $NETWORK_INTERFACE root handle 1: htb default 10
-sudo tc class add dev $NETWORK_INTERFACE parent 1: classid $CLASS_ID net_cls matchall
+    # Set up tc qdisc and class for the process
+    sudo tc qdisc add dev $NETWORK_INTERFACE root handle 1: htb default 12
+    sudo tc class add dev $NETWORK_INTERFACE parent 1: classid 1:$CLASS_ID htb rate 1Gbps
+    sudo tc filter add dev $NETWORK_INTERFACE parent 1: prio 2 protocol ip handle $CLASS_ID fw classid 1:$CLASS_ID
 
-# Mark packets from the cgroup with the appropriate class ID
-sudo iptables -A OUTPUT -m cgroup --cgroup $CLASS_ID -j CLASSIFY --set-class $CLASS_ID
+    # Set up net_cls cgroup for the process
+    sudo cgcreate -g net_cls:$CLASS_ID
+    sudo cgset -r net_cls.classid=$CLASS_ID $CLASS_ID
 
-# Wait for five minutes
-sleep 300
-
-# Get the total bytes sent by the process since the last check
-BYTES_SENT=$(sudo tc -s class show dev $NETWORK_INTERFACE classid $CLASS_ID | grep "bytes sent" | awk '{print $3}')
-
-# Convert bytes to megabytes
-MEGABYTES_SENT=$(echo "scale=2; $BYTES_SENT / (1024 * 1024)" | bc)
-
-# Get the date and time
-DATE=$(date +"%Y-%m-%d %H:%M:%S")
-
-# Write the result to a log file
-echo "$DATE: $MEGABYTES_SENT MB" >> ~/bandwidth.log
-
-# Repeat the process every five minutes until the end of the day
-while [[ $(date +"%H:%M") < "23:55" ]]; do
-    sleep 300
-    BYTES_SENT=$(sudo tc -s class show dev $NETWORK_INTERFACE classid $CLASS_ID | grep "bytes sent" | awk '{print $3}')
-    MEGABYTES_SENT=$(echo "scale=2; $BYTES_SENT / (1024 * 1024)" | bc)
-    DATE=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "$DATE: $MEGABYTES_SENT MB" >> ~/bandwidth.log
+    # Assign the process and all its child processes to the net_cls cgroup
+    for child_pid in $(pstree -p $pid | grep -o "([0-9]\+)" | grep -o "[0-9]\+")
+    do
+      sudo cgclassify -g net_cls:$CLASS_ID $child_pid
+    done
+  else
+    echo "Process $process_name not found"
+  fi
 done
 
-# Generate a daily report
-cat ~/bandwidth.log | grep "$(date +"%Y-%m-%d")" > ~/bandwidth_daily_report.log
+# Wait for 5 minutes
+sleep 300
+
+# Generate a daily report of the total bandwidth sent by each process
+for process_name in "${PROCESS_NAMES[@]}"
+do
+  # Get the PID of the process
+  pid=$(pgrep $process_name)
+
+  if [ -n "$pid" ]; then
+    # Generate the file name for the daily report
+    report_file="bandwidth_daily_report_$process_name.log"
+
+    # Get the total number of bytes transmitted by the process
+    BYTES_SENT="$(sudo tc -s -d class show dev $NETWORK_INTERFACE classid 1:$CLASS_ID | awk '/bytes/ {print $2}')"
+
+    # Log the total number of bytes to the daily report file
+    echo "$(date +%Y-%m-%d_%H:%M:%S) Process $process_name sent $BYTES_SENT bytes" >> "$report_file"
+  else
+    echo "Process $process_name not found"
+  fi
+done
+
+# Reset the tc and net_cls settings on exit
+sudo tc qdisc del dev $NETWORK_INTERFACE root
+sudo cgdelete net_cls:/
