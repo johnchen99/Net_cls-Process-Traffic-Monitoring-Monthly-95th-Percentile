@@ -1,3 +1,7 @@
+# yum -y install libcgroup libcgroup-tools
+# systemctl start cgconfig
+# systemctl enable cgconfig
+
 #!/bin/bash
 
 NETWORK_INTERFACE="p2p1"
@@ -27,6 +31,7 @@ done
 for i in "${process_to_remove[@]}"
 do
   unset PROCESS_NAMES[$i]
+  echo "Removed ${PROCESS_NAMES[$i]} from PROCESS_NAMES"
 done
 # Reset array indices
 PROCESS_NAMES=("${PROCESS_NAMES[@]}")
@@ -51,9 +56,7 @@ check_directories() {
 }
 check_directories "$DIR" "$DAILY_DIR" "$MONTHLY_DIR"
 
-
 found_process=false
-
 
 # Check if the network interface exists, else exit
 ip link show $NETWORK_INTERFACE >/dev/null 2>&1 || { echo >&2 "Error: Network interface $NETWORK_INTERFACE does not exist. Aborting."; exit 1; }
@@ -62,7 +65,7 @@ ip link show $NETWORK_INTERFACE >/dev/null 2>&1 || { echo >&2 "Error: Network in
 for i in "${!PROCESS_NAMES[@]}"
 do
   # Get the PID of the process
-  pid=$(pgrep $PROCESS_NAMES[$i])
+  pid=$(pgrep ${PROCESS_NAMES[$i]})
 
   if [ -n "$pid" ]; then
     found_process=true
@@ -96,7 +99,7 @@ fi
 for process_name in "${PROCESS_NAMES[@]}"
 do
   # Generate the file name for the daily report
-  report_file="${DAILY_DIR}/$(date +%Y-%m-%d)_${process_name}.log"
+  report_file="${DAILY_DIR}/${process_name}/$(date +%Y-%m-%d)_${process_name}.log"
 
   # Get the total number of bytes transmitted by the process
   BYTES_SENT="$(sudo tc -s -d class show dev $NETWORK_INTERFACE classid 1:$CLASS_ID | awk '/bytes/ {print $2}')"
@@ -117,14 +120,14 @@ if [ "$(date +%d)" -eq 1 ]; then
   for i in "${!PROCESS_NAMES[@]}"
   do
     # Generate the file name for the monthly report if file not exist
-    report_file="${MONTHLY_DIR}/$(date -d "last month" +%Y-%m)_${PROCESS_NAMES[$i]}_95th.log"
+    report_file="${MONTHLY_DIR}/${PROCESS_NAMES[$i]}/$(date -d "last month" +%Y-%m)_${PROCESS_NAMES[$i]}_95th.log"
     if [ ! -f "$report_file" ]; then
       
       # Create an array to store the daily bandwidth usage values for this process
       total_usage=()
 
       # Loop through all the daily log files from the previous month for this process
-      for daily_file in "${DAILY_DIR}/$(date -d "last month" +%Y-%m)-*-${PROCESS_NAMES[$i]}.log"
+      for daily_file in "${DAILY_DIR}/${PROCESS_NAMES[$i]}/$(date -d "last month" +%Y-%m)-*-${PROCESS_NAMES[$i]}.log"
       do
         # Extract the total number of bytes transmitted from the daily log file
         bytes_sent=$(awk '{ sum += $2 } END { print sum }' "$daily_file")
